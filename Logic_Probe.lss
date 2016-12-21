@@ -1,0 +1,252 @@
+
+AVRASM ver. 2.1.52  D:\Elektronik\AVR\Logic Probe\Logic Probe\Logic Probe.asm Wed Dec 21 15:34:50 2016
+
+D:\Elektronik\AVR\Logic Probe\Logic Probe\Logic Probe.asm(42): Including file 'C:\Program Files (x86)\Atmel\Atmel Toolchain\AVR Assembler\Native\2.1.39.1005\avrassembler\Include\tn26def.inc'
+D:\Elektronik\AVR\Logic Probe\Logic Probe\Logic Probe.asm(43): Including file 'D:\Elektronik\AVR\Logic Probe\Logic Probe\sam.inc'
+                 
+                 
+                 ;
+                 ;   L o g i c   P r o b e
+                 ;
+                 ; signals logic levels and pulse edges via LEDs and sound
+                 ;
+                 ; Copyright (C) 2016  Klaus Dormann
+                 ;
+                 ; This program is free software: you can redistribute it and/or modify
+                 ; it under the terms of the GNU General Public License as published by
+                 ; the Free Software Foundation, either version 3 of the License, or
+                 ; (at your option) any later version.
+                 ;
+                 ; This program is distributed in the hope that it will be useful,
+                 ; but WITHOUT ANY WARRANTY; without even the implied warranty of
+                 ; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+                 ; GNU General Public License for more details.
+                 ;
+                 ; You should have received a copy of the GNU General Public License
+                 ; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+                 ;
+                 ; contact info at http://2m5.de or email K@2m5.de
+                 ;
+                 ; Version: 21.12.2016 - completed testing
+                 ;
+                 ; ATTINY26 fuse settings (if other than default):
+                 ;   internal oscillator 8MHz - modify osccal in code!
+                 ;
+                 ; related docs:
+                 ;   circuit diagram
+                 ;
+                 ; description of hardware:
+                 ;   porta0:2   LEDs active low (a0 = high, a1 = low, a2 = pulse)
+                 ;   porta7     level switch input (open = CMOS, closed = TTL)
+                 ;   portb3     audio frequency output (oc1b)
+                 ;   portb6     probe input (adc9, int0)
+                 ;
+                 ; Changes:
+                 ;   21.12.2016 original version
+                  
+                       .LIST
+                                    
+                 ;
+                 ; reserved registers
+                 ;
+                 ; 0x00 non immediate
+                 .DEF  ls          =r4         ; # of low samples since last audio output
+                 .DEF  hs          =r5         ; # of high samples since last audio output
+                 .DEF  csf         =r6         ; current state frequency
+                 ; 0x10 immediate
+                 .DEF  a           =r16        ; immediate GPR
+                 .DEF  pa          =r17        ; port A shadow, a7=switch pullup, a0:a2=LEDs
+                 .DEF  et          =r18        ; 8ms units while edge detector LED is on
+                 ; 0x18 immediate word
+                                               ; none
+                 
+                 ;
+                 ; ******************* RESET ****************
+                 ;
+000000 ed0f            ldi   a,ramend          ;set Stack-Pointer
+000001 bf0d            out   sp,a
+                 ; *** modify value to be loaded to osccal according to device signature ***
+000002 ea02            ldi   a,0xa2            ;internal oscillator calibration value 8 MHz
+000003 bf01            out   osccal,a
+000004 e004            ldi   a,4               ;timer 0 ~ 8ms (ck/256)
+000005 bf03            out   tccr0,a
+000006 e807            ldi   a,(1<<ctc1)|7     ;timer 1 sound freq. by ctc, ck/64 
+000007 bd0f            out   tccr1b,a
+000008 e001            ldi   a,1               ;toggle sound on bottom
+000009 bd0c            out   ocr1b,a
+00000a e008            ldi   a,0b1000          ;sound out on pb3
+00000b bb07            out   ddrb,a
+00000c e007            ldi   a,0b111           ;LEDs on port a0:a2
+00000d bb0a            out   ddra,a
+00000e e810            ldi   pa,0x80           ;switch pullup on a7, all LEDs on
+00000f bb1b            out   porta,pa
+000010 e72c            ldi   et,124            ;wait 1 second while all LEDs are on
+                       do       LED_test
+                          do       LED_timer
+000011 b708                  in    a,tifr            ;8ms expired?
+000012 7002                  andi  a,(1<<tov0)
+000013 f3e9               loopeq   LED_timer
+000014 bf08               out   tifr,a            ;clear tov0
+000015 952a               dec   et
+000016 f7d1            loopne   LED_test
+000017 e817            ldi   pa,0x87           ;switch pullup on a7, all LEDs off
+000018 bb1b            out   porta,pa
+                                               ;ADC (probe level detector)
+000019 e209            ldi   a,(1<<adlar)|9    ;ADCref=AVcc, ADCH=8 bit, input=ADC9 (port b6)
+00001a b907            out   admux,a
+00001b ee06            ldi   a,(1<<aden)|(1<<adsc)|(1<<adfr)|6 ;ADC start free run with 125 kHz
+00001c b906            out   adcsr,a
+00001d e001            ldi   a,1               ;INT0 on level change (probe edge detector)
+00001e bf05            out   mcucr,a
+00001f 2466            clr   csf               ;clear registers to inactive state
+000020 2444            clr   ls
+000021 2455            clr   hs
+000022 2722            clr   et
+                 ;
+                 ; ****************** Main Program ************
+                 ;
+                       do    main
+                 ; ADC - check level and drive high and low LEDs
+                 ;       register # of samples qualifying as high or low
+000023 9b34               sbis  adcsr,adif     ;ADC conversion complete?
+000024 c019               ifs   adc_complete
+000025 b105                  in    a,adch         ;conversion upper 8 bits
+000026 9a34                  sbi   adcsr,adif     ;allow next conversion (free running)
+000027 6013                  sbr   pa,0b11        ;clear low & high LED (undefined)
+000028 9bcf                  sbis  pina,7         ;cmos/ttl levels?
+000029 c00a                  ifs   adc_cmos
+00002a 340d                     cpi   a,77        ;<=30% = low
+00002b f418                     iflo  adc_cmoslow
+00002c 7f1d                        cbr   pa,0b010    ;low LED on
+00002d 9443                        inc   ls          ;register low sample
+00002e c004                     else  adc_cmoslow
+00002f 3b02                        cpi   a,178       ;>=70% = high
+000030 f010                        ifsh  adc_cmoshigh
+000031 7f1e                           cbr   pa,0b001    ;high LED on
+000032 9453                           inc   hs          ;register high sample
+                                   end   adc_cmoshigh
+                                end   adc_cmoslow
+000033 c009                  else  adc_cmos
+000034 3209                     cpi   a,41        ;<=0.8V = low
+000035 f418                     iflo  adc_ttllow
+000036 7f1d                        cbr   pa,0b010    ;low LED on
+000037 9443                        inc   ls          ;register low sample
+000038 c004                     else  adc_ttllow
+000039 3606                        cpi   a,102       ;>=2v = high
+00003a f010                        ifsh  adc_ttlhigh
+00003b 7f1e                           cbr   pa,0b001    ;high LED on
+00003c 9453                           inc   hs          ;register high sample
+                                   end   adc_ttlhigh
+                                end   adc_ttllow
+                             end   adc_cmos
+00003d bb1b                  out   porta,pa       ;set LEDs according to logic state
+                          end   adc_complete
+                 ; 8ms timer 0 - check 100ms pulse LED on timer
+                 ;               drive timer 1 sound output control
+00003e b708               in    a,tifr         ;8ms timer?
+00003f 7002               andi  a,(1<<tov0)
+000040 f111               ifne  timer8
+000041 bf08                  out   tifr,a         ;clear flag
+000042 2322                  tst   et             ;edge timer expired?
+000043 f021                  ifne  edge_timer
+000044 952a                     dec   et             ;edge timer countdown
+000045 f411                     ifeq  edge_LED_off
+000046 6014                        sbr   pa,0b100       ;pulse LED off
+000047 bb1b                        out   porta,pa
+                                end   edge_LED_off
+                             end   edge_timer
+000048 2f02                  mov   a,et        ;any edges or logic levels detected?
+000049 2905                  or    a,hs
+00004a 2904                  or    a,ls
+00004b f0a1                  ifne  audio_actv
+00004c 1454                     cp    hs,ls       ;more high or more low?
+00004d f038                     ifsh  audio_high
+00004e 2055                        tst   hs          ;only edges?
+00004f f411                        ifeq  audio_edge
+000050 e700                           ldi   a,0x70      ;1109Hz (C#6) pulse
+000051 c002                        else  audio_edge
+000052 e406                           ldi   a,0x46      ;1760Hz (A6) high
+000053 2455                           clr   hs
+                                   end   audio_edge
+000054 c002                     else  audio_high
+000055 eb0d                        ldi   a,0xbd      ;659Hz (E5) low
+000056 2444                        clr   ls
+                                end   audio_high
+000057 1506                     cp    a,csf          ;on steady state
+000058 f419                     ifeq_and steady_pulse
+000059 2322                     tst   et             ;and pulse
+00005a f009                     ifne     steady_pulse
+00005b e700                        ldi   a,0x70         ;1109Hz (C#6) pulse
+                                end      steady_pulse
+00005c 2e60                     mov   csf,a          ;save current state
+00005d bd0b                     out   ocr1c,a        ;set frequency
+00005e e100                     ldi   a,(1<<com1b0)  ;oc1b (pb3) = toggle (=sound)  
+00005f c002                  else  audio_actv
+000060 2466                     clr   csf
+000061 e200                     ldi   a,(2<<com1b0)  ;oc1b (pb3) = clear (=silent)
+                             end   audio_actv
+000062 bf00                  out   tccr1a,a       ;set OC1A (pb1)
+                          end   timer8
+                 ; INT0 - drive pulse LED and on timer
+000063 b70a               in    a,gifr         ;pulse edge detected?
+000064 7400               andi  a,(1<<intf0)
+000065 f021               ifne  edge_detect
+000066 bf0a                  out   gifr,a         ;clear flag
+000067 e02c                  ldi   et,12          ;~100 ms
+000068 7f1b                  cbr   pa,0b100       ;pulse LED on
+000069 bb1b                  out   porta,pa
+                          end   edge_detect
+00006a cfb8            loop  main
+
+
+RESOURCE USE INFORMATION
+------------------------
+
+Notice:
+The register and instruction counts are symbol table hit counts,
+and hence implicitly used resources are not counted, eg, the
+'lpm' instruction without operands implicitly uses r0 and z,
+none of which are counted.
+
+x,y,z are separate entities in the symbol table and are
+counted separately from r26..r31 here.
+
+.dseg memory usage only counts static data declared with .byte
+
+"ATtiny26" register use summary:
+r0 :   0 r1 :   0 r2 :   0 r3 :   0 r4 :   6 r5 :   7 r6 :   4 r7 :   0 
+r8 :   0 r9 :   0 r10:   0 r11:   0 r12:   0 r13:   0 r14:   0 r15:   0 
+r16:  47 r17:  14 r18:   8 r19:   0 r20:   0 r21:   0 r22:   0 r23:   0 
+r24:   0 r25:   0 r26:   0 r27:   0 r28:   0 r29:   0 r30:   0 r31:   0 
+x  :   0 y  :   0 z  :   0 
+Registers used: 6 out of 35 (17.1%)
+
+"ATtiny26" instruction use summary:
+.lds  :   0 .sts  :   0 adc   :   0 add   :   0 adiw  :   0 and   :   0 
+andi  :   3 asr   :   0 bclr  :   0 bld   :   0 brbc  :   6 brbs  :   9 
+brcc  :   0 brcs  :   0 breq  :   0 brge  :   0 brhc  :   0 brhs  :   0 
+brid  :   0 brie  :   0 brlo  :   0 brlt  :   0 brmi  :   0 brne  :   0 
+brpl  :   0 brsh  :   0 brtc  :   0 brts  :   0 brvc  :   0 brvs  :   0 
+bset  :   0 bst   :   0 cbi   :   0 cbr   :   5 clc   :   0 clh   :   0 
+cli   :   0 cln   :   0 clr   :   7 cls   :   0 clt   :   0 clv   :   0 
+clz   :   0 com   :   0 cp    :   2 cpc   :   0 cpi   :   4 cpse  :   0 
+dec   :   2 eor   :   0 icall :   0 ijmp  :   0 in    :   4 inc   :   4 
+ld    :   0 ldd   :   0 ldi   :  20 lds   :   0 lpm   :   0 lsl   :   0 
+lsr   :   0 mov   :   2 neg   :   0 nop   :   0 or    :   2 ori   :   0 
+out   :  20 pop   :   0 push  :   0 rcall :   0 ret   :   0 reti  :   0 
+rjmp  :   9 rol   :   0 ror   :   0 sbc   :   0 sbci  :   0 sbi   :   1 
+sbic  :   0 sbis  :   2 sbiw  :   0 sbr   :   2 sbrc  :   0 sbrs  :   0 
+sec   :   0 seh   :   0 sei   :   0 sen   :   0 ser   :   0 ses   :   0 
+set   :   0 sev   :   0 sez   :   0 sleep :   0 st    :   0 std   :   0 
+sts   :   0 sub   :   0 subi  :   0 swap  :   0 tst   :   3 wdr   :   0 
+
+Instructions used: 19 out of 102 (18.6%)
+
+"ATtiny26" memory use summary [bytes]:
+Segment   Begin    End      Code   Data   Used    Size   Use%
+---------------------------------------------------------------
+[.cseg] 0x000000 0x0000d6    214      0    214    2048  10.4%
+[.dseg] 0x000060 0x000060      0      0      0     128   0.0%
+[.eseg] 0x000000 0x000000      0      0      0     128   0.0%
+
+Assembly complete, 0 errors, 0 warnings
