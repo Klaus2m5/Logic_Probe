@@ -22,6 +22,7 @@
 ; contact info at http://2m5.de or email K@2m5.de
 ;
 ; Version: 21.12.2016 - completed testing
+;          22.12.2016 - fixed probe precharge for TTL level
 ;
 ; ATTINY26 fuse settings (if other than default):
 ;   internal oscillator 8MHz - modify osccal in code!
@@ -31,6 +32,7 @@
 ;
 ; description of hardware:
 ;   porta0:2   LEDs active low (a0 = high, a1 = low, a2 = pulse)
+;   porta6     precharge probe (high = CMOS 50%, Hi-Z = TTL 1.4V)
 ;   porta7     level switch input (open = CMOS, closed = TTL)
 ;   portb3     audio frequency output (oc1b)
 ;   portb6     probe input (adc9, int0)
@@ -109,7 +111,7 @@
          ifs   adc_complete
             in    a,adch         ;conversion upper 8 bits
             sbi   adcsr,adif     ;allow next conversion (free running)
-            sbr   pa,0b11        ;clear low & high LED (undefined)
+            sbr   pa,0b01000011  ;clear level LEDs (undefined), set CMOS (pa6)
             sbis  pina,7         ;cmos/ttl levels?
             ifs   adc_cmos
                cpi   a,77        ;<=30% = low
@@ -123,6 +125,7 @@
                      inc   hs          ;register high sample
                   end   adc_cmoshigh
                end   adc_cmoslow
+               sbi   ddra,6      ;set CMOS mode probe precharge (50%)
             else  adc_cmos
                cpi   a,41        ;<=0.8V = low
                iflo  adc_ttllow
@@ -135,6 +138,8 @@
                      inc   hs          ;register high sample
                   end   adc_ttlhigh
                end   adc_ttllow
+               cbr   pa,(1<<6)      ;set TTL mode probe precharge (1.4V)
+               cbi   ddra,6
             end   adc_cmos
             out   porta,pa       ;set LEDs according to logic state
          end   adc_complete
@@ -163,12 +168,12 @@
                      ldi   a,0x70      ;1109Hz (C#6) pulse
                   else  audio_edge
                      ldi   a,0x46      ;1760Hz (A6) high
-                     clr   hs
                   end   audio_edge
                else  audio_high
                   ldi   a,0xbd      ;659Hz (E5) low
-                  clr   ls
                end   audio_high
+               clr   ls             ;reset sample counts
+               clr   hs
                cp    a,csf          ;on steady state
                ifeq_and steady_pulse
                tst   et             ;and pulse
